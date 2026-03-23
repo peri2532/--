@@ -74,10 +74,10 @@ HEADERS = {
 # ── 클래스명 조각 (find_all lambda 방식으로 사용) ──────────────────────────────
 # CSS class*= 셀렉터는 BeautifulSoup에서 따옴표 중첩 버그가 있어 사용 금지.
 # 대신 아래 문자열을 lambda 함수로 검사한다.
-CLS_CARD        = "OaLkxeV3OLBNnXoC"       # 기사 카드 div
-CLS_TITLE       = "_9NVs5F7DbeVKmhcwTTdw"  # 기사 제목 span
-CLS_NAVER_LINK  = "GOWcekJV4wHE8GArxPuu"   # 네이버뉴스 링크 a
-CLS_PRESS       = "sds-comps-profile-info-title-text"  # 언론사 span
+CLS_CARD        = "NeAafkdKXmnzjcAF_y01"
+CLS_TITLE       = "_9NVs5F7DbeVKmhcwTTdw"
+CLS_NAVER_LINK  = "ByqJOtaiD32azLYpWrSb"
+CLS_PRESS       = "sds-comps-profile-info-title-text"
 
 DATE_RE = re.compile(r"\d{4}[.\-]\d{2}[.\-]\d{2}|\d+\s*(시간|분|일)\s*전")
 
@@ -181,9 +181,6 @@ def fetch(url, session=None):
 
 def parse_html(resp):
     try:
-        # requests 가 gzip 압축을 자동 해제한 후 content 를 사용
-        # resp.text 는 encoding 설정에 따라 깨질 수 있으므로
-        # resp.content (bytes) 를 직접 BeautifulSoup 에 넘김
         return BeautifulSoup(resp.content, "html.parser")
     except Exception as e:
         log.warning("HTML 파싱 실패: %s", e)
@@ -488,7 +485,9 @@ def scrape(session, meta):
         log_fail(url, "파싱 실패")
         return None
 
-    # 본문
+    # =========================
+    # 1. 본문 추출
+    # =========================
     body = None
     for s in BODY_SELS:
         try:
@@ -496,32 +495,50 @@ def scrape(session, meta):
             if c and len(c.get_text(strip=True)) > 30:
                 body = c
                 break
-        except Exception:
+        except:
             pass
+
     if body is None:
         log_fail(url, "본문 없음")
         return None
 
-    try:
-        raw = body.get_text(separator="\n")
-    except Exception as e:
-        log_fail(url, f"본문 추출 오류: {e}")
-        return None
+    raw = body.get_text(separator="\n")
 
-    # 제목
-    try:
-        title = first_text(soup, HEAD_TITLE_SELS) or meta.get("title", "")
-        title = re.sub(r"\s*[-|]\s*(네이버\s*뉴스|Naver\s*News).*$", "", title).strip()
-    except Exception:
-        title = meta.get("title", "")
+    # =========================
+    # 2. 제목
+    # =========================
+    title = first_text(soup, HEAD_TITLE_SELS) or meta.get("title", "")
+    title = re.sub(r"\s*[-|]\s*(네이버\s*뉴스|Naver\s*News).*$", "", title).strip()
 
-    # 날짜
+    # =========================
+    # 3. 날짜 (🔥 핵심 수정)
+    # =========================
+    date = None
+
+    # 1순위: data-date-time (가장 정확)
     try:
+        date_tag = soup.select_one(".media_end_head_info_datestamp_time")
+        if date_tag and date_tag.has_attr("data-date-time"):
+            date = date_tag["data-date-time"]
+    except:
+        pass
+
+    # 2순위: meta 태그 (언론사 사이트 대응)
+    if not date:
+        try:
+            meta_date = soup.select_one("meta[property='article:published_time']")
+            if meta_date:
+                date = meta_date.get("content")
+        except:
+            pass
+
+    # 3순위: 기존 방식 fallback
+    if not date:
         date = first_text(soup, HEAD_DATE_SELS) or meta.get("date", "")
-    except Exception:
-        date = meta.get("date", "")
 
-    # 언론사
+    # =========================
+    # 4. 언론사
+    # =========================
     press = meta.get("press", "")
     try:
         for s in [".media_end_head_top_logo img", "#cp_news_top_logo img"]:
@@ -529,18 +546,25 @@ def scrape(session, meta):
             if img and img.get("alt", "").strip():
                 press = img["alt"].strip()
                 break
-    except Exception:
+    except:
         pass
 
+    # =========================
+    # 5. 본문 정제
+    # =========================
     content = clean_text(raw)
+
     if len(content) < 50:
         log_fail(url, f"본문 짧음({len(content)}자)")
         return None
 
-    return {"title": title, "content": content,
-            "date": date, "press": press, "url": url}
-
-
+    return {
+        "title": title,
+        "content": content,
+        "date": date,
+        "press": press,
+        "url": url
+    }
 # ============================================================
 # 체크포인트
 # ============================================================
