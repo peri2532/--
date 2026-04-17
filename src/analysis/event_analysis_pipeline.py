@@ -12,7 +12,7 @@ import requests  # 🔥 추가
 # 0. 설정
 # =========================
 
-INPUT_CSV = "data/result/naver_samsung_news_refined.csv"
+INPUT_CSV = "C:/Users/peri2/새 폴더/--/data/result/naver_samsung_news_refined.csv"
 OUTPUT_DIR = "output"
 EVENT_THRESHOLD = 0.5
 MIN_ARTICLE_COUNT = 5
