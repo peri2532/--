@@ -6,7 +6,7 @@ from typing import List
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-
+import requests  # 🔥 추가
 
 # =========================
 # 0. 설정
@@ -14,9 +14,35 @@ import matplotlib.pyplot as plt
 
 INPUT_CSV = "data/result/naver_samsung_news_refined.csv"
 OUTPUT_DIR = "output"
-EVENT_THRESHOLD = 0.5      # 기존 0.3 → 개선
-MIN_ARTICLE_COUNT = 5      # 기사 수 필터
+EVENT_THRESHOLD = 0.5
+MIN_ARTICLE_COUNT = 5
 
+API_URL = "http://localhost:8080/api/news"  # 🔥 추가
+
+# =========================
+# 🔥 Spring 서버 전송 함수
+# =========================
+
+def send_to_server(row):
+    data = {
+        "stockCode": "005930",
+        "title": row["title"],
+        "content": row["content"],
+        "summary": row.get("summary", ""),
+        "source": "naver",
+        "url": row["url"],
+        "urlHash": str(hash(row["url"])),
+        "publishedAt": str(row["date"]),
+        "sentimentScore": float(row.get("sentiment_score", 0.0)),
+        "sentimentLabel": row.get("final_sentiment", "neutral"),
+        "eventTags": "NONE"
+    }
+
+    try:
+        res = requests.post(API_URL, json=data)
+        print("전송:", res.text)
+    except Exception as e:
+        print("전송 실패:", e)
 
 # =========================
 # 1. 유틸
@@ -48,7 +74,6 @@ def sentiment_to_num(x):
         return -1
     return 0
 
-
 # =========================
 # 2. sentiment_num 재생성
 # =========================
@@ -57,7 +82,6 @@ def rebuild_sentiment_num(df):
     df = df.copy()
     df["sentiment_num"] = df["final_sentiment"].apply(sentiment_to_num)
     return df
-
 
 # =========================
 # 3. 집계
@@ -74,11 +98,9 @@ def aggregate_daily(df):
         .sort_values("date_only")
     )
 
-    # 기사 수 필터 (노이즈 제거)
     daily = daily[daily["article_count"] >= MIN_ARTICLE_COUNT]
 
     return daily
-
 
 # =========================
 # 4. 이벤트 탐지
@@ -94,9 +116,8 @@ def detect_events(daily):
 
     return daily, events
 
-
 # =========================
-# 5. TextRank 요약 (안정화)
+# 5. TextRank 요약
 # =========================
 
 def split_sentences(text):
@@ -159,9 +180,8 @@ def add_summary(df):
     df["summary"] = df["content"].apply(summarize)
     return df
 
-
 # =========================
-# 6. 이벤트 대표 뉴스
+# 6. 이벤트 뉴스
 # =========================
 
 def extract_event_news(df, events):
@@ -169,7 +189,6 @@ def extract_event_news(df, events):
 
     for d in events["date_only"]:
         sub = df[df["date_only"] == d]
-
         top = sub.sort_values("sentiment_score", ascending=False).head(3)
 
         for _, row in top.iterrows():
@@ -180,7 +199,6 @@ def extract_event_news(df, events):
             })
 
     return pd.DataFrame(results)
-
 
 # =========================
 # 7. 시각화
@@ -204,7 +222,6 @@ def plot_pie(df):
     plt.savefig("output/pie.png")
     plt.close()
 
-
 # =========================
 # 8. 메인
 # =========================
@@ -223,6 +240,11 @@ def main():
     df = add_summary(df)
 
     event_news = extract_event_news(df, events)
+
+    # 🔥 Spring 서버 전송 추가
+    print("\n[Spring 서버 전송 시작]")
+    for _, row in df.iterrows():
+        send_to_server(row)
 
     plot_trend(daily)
     plot_pie(df)
