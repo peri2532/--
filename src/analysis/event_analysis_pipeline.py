@@ -1,73 +1,37 @@
 import os
 import re
 import math
-from typing import List
+import hashlib
+import requests
+from collections import Counter
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import requests  # 🔥 추가
 
 # =========================
-# 0. 설정
+# 설정
 # =========================
+INPUT_CSV = "C:/Users/wf/Downloads/졸작/data/result/naver_samsung_news_refined.csv"
 
-INPUT_CSV = "C:/Users/peri2/새 폴더/--/data/result/naver_samsung_news_refined.csv"
-OUTPUT_DIR = "output"
+NEWS_API_URL = "http://localhost:8080/api/news"
+EVENT_API_URL = "http://localhost:8080/api/events"
+
+SEND_LIMIT = 100
 EVENT_THRESHOLD = 0.5
-MIN_ARTICLE_COUNT = 5
-
-API_URL = "http://localhost:8080/api/news"  # 🔥 추가
 
 # =========================
-# 🔥 Spring 서버 전송 함수
+# 유틸
 # =========================
-
-def send_to_server(row):
-    data = {
-        "stockCode": "005930",
-        "title": row["title"],
-        "content": row["content"],
-        "summary": row.get("summary", ""),
-        "source": "naver",
-        "url": row["url"],
-        "urlHash": str(hash(row["url"])),
-        "publishedAt": str(row["date"]),
-        "sentimentScore": float(row.get("sentiment_score", 0.0)),
-        "sentimentLabel": row.get("final_sentiment", "neutral"),
-        "eventTags": "NONE"
-    }
-
-    try:
-        res = requests.post(API_URL, json=data)
-        print("전송:", res.text)
-    except Exception as e:
-        print("전송 실패:", e)
-
-# =========================
-# 1. 유틸
-# =========================
-
-def ensure_output_dir(output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-
-
 def clean_text(text):
     if pd.isna(text):
         return ""
     return re.sub(r"\s+", " ", str(text)).strip()
 
-
-def parse_date(df):
-    df = df.copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"])
-    df["date_only"] = df["date"].dt.date
-    return df
-
+def make_url_hash(url):
+    return hashlib.sha256(str(url).encode("utf-8")).hexdigest()
 
 def sentiment_to_num(x):
-    x = str(x).lower().strip()
+    x = str(x).lower()
     if x == "positive":
         return 1
     elif x == "negative":
@@ -75,187 +39,134 @@ def sentiment_to_num(x):
     return 0
 
 # =========================
-# 2. sentiment_num 재생성
+# 요약 (간단 TextRank)
 # =========================
+def split_sentences(text):
+    text = clean_text(text)
+    return re.split(r'(?<=[.!?다요])\s+', text)
 
-def rebuild_sentiment_num(df):
-    df = df.copy()
-    df["sentiment_num"] = df["final_sentiment"].apply(sentiment_to_num)
-    return df
+def summarize(text):
+    sents = split_sentences(text)
+    return " ".join(sents[:3])  # 간단 버전
 
 # =========================
-# 3. 집계
+# 키워드 추출
 # =========================
+def extract_keywords(text, top_n=5):
+    words = re.findall(r"[가-힣]{2,}", text)
+    counter = Counter(words)
+    return [w for w, _ in counter.most_common(top_n)]
 
-def aggregate_daily(df):
+# =========================
+# 뉴스 서버 전송
+# =========================
+def send_news(row):
+    try:
+        data = {
+            "stockCode": "005930",
+            "title": clean_text(row["title"]),
+            "content": clean_text(row["content"]),
+            "summary": row["summary"],
+            "source": "naver",
+            "url": row["url"],
+            "urlHash": make_url_hash(row["url"]),
+            "publishedAt": str(row["date"]).replace(" ", "T"),
+            "sentimentScore": float(row.get("sentiment_score", 0.0)),
+            "sentimentLabel": str(row.get("final_sentiment", "neutral")).lower(),
+            "eventTags": "NONE",
+            "isRepresentative": True
+        }
+
+        res = requests.post(NEWS_API_URL, json=data)
+        print(f"[NEWS {res.status_code}] {data['title']}")
+
+    except Exception as e:
+        print("뉴스 전송 실패:", e)
+
+# =========================
+# 이벤트 서버 전송
+# =========================
+def send_event(event):
+    try:
+        data = {
+            "stockCode": "005930",
+            "eventDate": str(event["date"]),
+            "eventType": event["type"],
+            "changeRate": float(event["change"]),
+            "keyword": ", ".join(event["keywords"]),
+            "summary": event["summary"]
+        }
+
+        res = requests.post(EVENT_API_URL, json=data)
+        print(f"[EVENT {res.status_code}] {event['type']} {event['date']}")
+
+    except Exception as e:
+        print("이벤트 전송 실패:", e)
+
+# =========================
+# 이벤트 탐지
+# =========================
+def detect_events(df):
     daily = (
         df.groupby("date_only")
-        .agg(
-            sentiment_score=("sentiment_num", "mean"),
-            article_count=("sentiment_num", "count")
-        )
+        .agg(score=("sentiment_num", "mean"))
         .reset_index()
         .sort_values("date_only")
     )
 
-    daily = daily[daily["article_count"] >= MIN_ARTICLE_COUNT]
+    daily["prev"] = daily["score"].shift(1)
+    daily["change"] = daily["score"] - daily["prev"]
 
-    return daily
+    events = daily[abs(daily["change"]) >= EVENT_THRESHOLD]
 
-# =========================
-# 4. 이벤트 탐지
-# =========================
-
-def detect_events(daily):
-    daily = daily.copy()
-
-    daily["prev"] = daily["sentiment_score"].shift(1)
-    daily["change"] = daily["sentiment_score"] - daily["prev"]
-
-    events = daily[abs(daily["change"]) >= EVENT_THRESHOLD].copy()
-
-    return daily, events
+    return events
 
 # =========================
-# 5. TextRank 요약
+# 메인
 # =========================
-
-def split_sentences(text):
-    text = clean_text(text)
-    if not text:
-        return []
-    sents = re.split(r'(?<=[.!?다요])\s+', text)
-    return [s for s in sents if len(s) > 10]
-
-
-def sentence_similarity(a, b):
-    A, B = set(a.split()), set(b.split())
-    if not A or not B:
-        return 0
-    return len(A & B) / (math.log(len(A)+1) + math.log(len(B)+1))
-
-
-def build_matrix(sents):
-    n = len(sents)
-    M = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            if i != j:
-                M[i][j] = sentence_similarity(sents[i], sents[j])
-    return M
-
-
-def textrank(M, d=0.85, iters=30):
-    n = len(M)
-    if n == 0:
-        return np.array([])
-
-    row_sum = M.sum(axis=1, keepdims=True)
-    M = np.divide(M, row_sum, where=row_sum != 0, out=np.zeros_like(M))
-
-    score = np.ones(n) / n
-
-    for _ in range(iters):
-        score = (1-d)/n + d * M.T.dot(score)
-
-    return score
-
-
-def summarize(text):
-    sents = split_sentences(text)
-    if len(sents) <= 3:
-        return " ".join(sents)
-
-    M = build_matrix(sents)
-    scores = textrank(M)
-
-    top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:3]
-    top = sorted(top)
-
-    return " ".join([sents[i] for i in top])
-
-
-def add_summary(df):
-    df = df.copy()
-    df["summary"] = df["content"].apply(summarize)
-    return df
-
-# =========================
-# 6. 이벤트 뉴스
-# =========================
-
-def extract_event_news(df, events):
-    results = []
-
-    for d in events["date_only"]:
-        sub = df[df["date_only"] == d]
-        top = sub.sort_values("sentiment_score", ascending=False).head(3)
-
-        for _, row in top.iterrows():
-            results.append({
-                "date": d,
-                "title": row["title"],
-                "sentiment": row["final_sentiment"]
-            })
-
-    return pd.DataFrame(results)
-
-# =========================
-# 7. 시각화
-# =========================
-
-def plot_trend(daily):
-    plt.figure()
-    plt.plot(daily["date_only"], daily["sentiment_score"])
-    plt.xticks(rotation=45)
-    plt.title("Sentiment Trend")
-    plt.tight_layout()
-    plt.savefig("output/trend.png")
-    plt.close()
-
-
-def plot_pie(df):
-    counts = df["final_sentiment"].value_counts()
-    plt.figure()
-    plt.pie(counts.values, labels=counts.index, autopct="%1.1f%%")
-    plt.title("Sentiment Distribution")
-    plt.savefig("output/pie.png")
-    plt.close()
-
-# =========================
-# 8. 메인
-# =========================
-
 def main():
-    ensure_output_dir(OUTPUT_DIR)
 
-    df = pd.read_csv(INPUT_CSV)
+    print("\n[STEP 1] 데이터 로드")
+    df = pd.read_csv(INPUT_CSV).head(SEND_LIMIT)
 
-    df = parse_date(df)
-    df = rebuild_sentiment_num(df)
+    df["date"] = pd.to_datetime(df["date"])
+    df["date_only"] = df["date"].dt.date
+    df["sentiment_num"] = df["final_sentiment"].apply(sentiment_to_num)
 
-    daily = aggregate_daily(df)
-    daily, events = detect_events(daily)
+    print("  → 데이터 준비 완료")
 
-    df = add_summary(df)
+    print("\n[STEP 2] 요약 + 키워드")
+    df["summary"] = df["content"].apply(summarize)
+    df["keywords"] = df["content"].apply(extract_keywords)
 
-    event_news = extract_event_news(df, events)
-
-    # 🔥 Spring 서버 전송 추가
-    print("\n[Spring 서버 전송 시작]")
+    print("\n[STEP 3] 뉴스 서버 전송")
     for _, row in df.iterrows():
-        send_to_server(row)
+        send_news(row)
 
-    plot_trend(daily)
-    plot_pie(df)
+    print("\n[STEP 4] 이벤트 탐지")
+    events = detect_events(df)
 
-    df.to_csv("output/news_with_summary.csv", index=False)
-    daily.to_csv("output/daily.csv", index=False)
-    events.to_csv("output/events.csv", index=False)
-    event_news.to_csv("output/event_news.csv", index=False)
+    print(f"  → 이벤트 {len(events)}개 발견")
 
-    print("\n[완료]")
-    print("이벤트 수:", len(events))
+    print("\n[STEP 5] 이벤트 서버 전송")
+    for _, row in events.iterrows():
+
+        subset = df[df["date_only"] == row["date_only"]]
+
+        keywords = extract_keywords(" ".join(subset["content"].tolist()))
+        summary = summarize(" ".join(subset["content"].tolist()))
+
+        event_data = {
+            "date": row["date_only"],
+            "type": "급등" if row["change"] > 0 else "급락",
+            "change": row["change"],
+            "keywords": keywords,
+            "summary": summary
+        }
+
+        send_event(event_data)
+
+    print("\n[완료] 전체 파이프라인 종료")
 
 
 if __name__ == "__main__":
